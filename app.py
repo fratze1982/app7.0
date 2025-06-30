@@ -1,74 +1,63 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import csv
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.multioutput import MultiOutputRegressor
+from sklearn.inspection import PartialDependenceDisplay
 import matplotlib.pyplot as plt
+import seaborn as sns
 
-st.set_page_config(page_title="Flexible KI-Vorhersage für Lackrezepturen", layout="wide")
-st.title("🎨 Flexible KI-Vorhersage für Lackrezepturen")
+st.set_page_config(page_title="KI-Vorhersage für Lackrezepturen", layout="wide")
+st.title("\U0001F3A8 KI-Vorhersage für Lackrezepturen")
 
-uploaded_file = st.file_uploader("📁 CSV-Datei hochladen", type=["csv"])
+# --- Datei-Upload ---
+uploaded_file = st.file_uploader("\U0001F4C1 CSV-Datei hochladen (mit ; getrennt)", type=["csv"])
 if uploaded_file is None:
     st.warning("Bitte lade eine CSV-Datei hoch.")
     st.stop()
 
-def robust_csv_reader(file, sep=';', decimal=','):
-    bad_lines = []
-    file.seek(0)
-    first_line = file.readline().decode('utf-8')
-    n_cols = len(first_line.strip().split(sep))
-    file.seek(0)
-
-    valid_lines = []
-    for i, line in enumerate(file):
-        decoded = line.decode('utf-8')
-        cols = decoded.strip().split(sep)
-        if len(cols) != n_cols:
-            bad_lines.append((i+1, decoded.strip()))
-        else:
-            valid_lines.append(decoded)
-    if bad_lines:
-        st.warning(f"Folgende Zeilen haben abweichende Spaltenanzahl (erwartet {n_cols}):")
-        for linenr, content in bad_lines:
-            st.warning(f"Zeile {linenr}: {content}")
-
-    from io import StringIO
-    data_str = first_line + "".join(valid_lines)
-    df = pd.read_csv(StringIO(data_str), sep=sep, decimal=decimal, engine='python')
-    return df
-
+# --- CSV einlesen mit Fehlerbehandlung für uneinheitliche Zeilen ---
 try:
-    df = robust_csv_reader(uploaded_file)
+    df_raw = uploaded_file.getvalue().decode("utf-8").splitlines()
+    header = df_raw[0].count(";")
+    df_cleaned = [line for line in df_raw if line.count(";") == header]
+    df = pd.read_csv(pd.compat.StringIO("\n".join(df_cleaned)), sep=";", decimal=",")
     st.success("✅ Datei erfolgreich geladen.")
 except Exception as e:
-    st.error(f"Fehler beim Einlesen der Datei: {e}")
+    st.error(f"❌ Fehler beim Einlesen der Datei: {e}")
     st.stop()
 
-st.write("Spalten in der Datei:", df.columns.tolist())
+st.write("\U0001F9FE Gefundene Spalten:", df.columns.tolist())
 
-zielspalten = st.multiselect("🎯 Zielgrößen auswählen (numerische Spalten)", options=df.select_dtypes(include=[np.number]).columns.tolist())
+# --- Zielgrößen aus numerischen Spalten dynamisch auswählen ---
+numerische_spalten = df.select_dtypes(include=[np.number]).columns.tolist()
+
+if not numerische_spalten:
+    st.error("❌ Keine numerischen Spalten im Datensatz gefunden.")
+    st.stop()
+
+zielspalten = st.multiselect(
+    "\U0001F3AF Zielgrößen auswählen (numerische Spalten)",
+    options=numerische_spalten,
+    default=[numerische_spalten[0]]
+)
+
 if not zielspalten:
     st.warning("Bitte mindestens eine Zielgröße auswählen.")
     st.stop()
 
-moegliche_features = [c for c in df.columns if c not in zielspalten]
-feature_spalten = st.multiselect("🔧 Einflussgrößen (Features) auswählen", options=moegliche_features, default=moegliche_features)
-if not feature_spalten:
-    st.warning("Bitte mindestens eine Einflussgröße auswählen.")
-    st.stop()
-
-X = df[feature_spalten].copy()
+# --- Eingabe- und Zielvariablen trennen ---
+X = df.drop(columns=zielspalten, errors="ignore")
 y = df[zielspalten].copy()
 
-kategorisch = X.select_dtypes(include=["object", "category"]).columns.tolist()
-numerisch = X.select_dtypes(include=[np.number]).columns.tolist()
+# Spaltentypen bestimmen
+kategorisch = X.select_dtypes(include="object").columns.tolist()
+numerisch = X.select_dtypes(exclude="object").columns.tolist()
 
-st.write(f"📊 Kategorische Features: {kategorisch}")
-st.write(f"🔢 Numerische Features: {numerisch}")
-
+# One-Hot-Encoding
 X_encoded = pd.get_dummies(X)
+
+# Fehlende Werte bereinigen
 df_encoded = X_encoded.copy()
 df_encoded[y.columns] = y
 df_encoded = df_encoded.dropna()
@@ -77,105 +66,47 @@ X_clean = df_encoded[X_encoded.columns]
 y_clean = df_encoded[y.columns]
 
 if X_clean.empty or y_clean.empty:
-    st.error("❌ Keine gültigen Trainingsdaten nach Bereinigung.")
+    st.error("❌ Keine gültigen Daten zum Trainieren.")
     st.stop()
 
+# --- Modelltraining ---
 modell = MultiOutputRegressor(RandomForestRegressor(n_estimators=150, random_state=42))
 modell.fit(X_clean, y_clean)
-st.success("✅ Modell trainiert!")
 
-st.sidebar.header("🔧 Eingabewerte anpassen")
+# --- Benutzer-Eingabeformular ---
+st.sidebar.header("\U0001F527 Parameter anpassen")
 user_input = {}
+
 for col in numerisch:
-    min_val = float(df[col].min())
-    max_val = float(df[col].max())
-    mean_val = float(df[col].mean())
-    user_input[col] = st.sidebar.slider(col, min_val, max_val, mean_val)
+    try:
+        min_val = float(df[col].min())
+        max_val = float(df[col].max())
+        mean_val = float(df[col].mean())
+        user_input[col] = st.sidebar.slider(col, min_val, max_val, mean_val)
+    except:
+        continue
+
 for col in kategorisch:
     options = sorted(df[col].dropna().unique())
     user_input[col] = st.sidebar.selectbox(col, options)
 
 input_df = pd.DataFrame([user_input])
 input_encoded = pd.get_dummies(input_df)
+
+# Fehlende Spalten auffüllen
 for col in X_clean.columns:
     if col not in input_encoded.columns:
         input_encoded[col] = 0
 input_encoded = input_encoded[X_clean.columns]
 
+# --- Vorhersage ---
 prediction = modell.predict(input_encoded)[0]
 
-st.subheader("🔮 Vorhergesagte Zielgrößen")
+st.subheader("\U0001F52E Vorhergesagte Zielgrößen")
 for i, ziel in enumerate(zielspalten):
     st.metric(label=ziel, value=round(prediction[i], 2))
 
-# --- Zieloptimierung ---
-ergebnis_df = pd.DataFrame()
-
-st.subheader("🎯 Zieloptimierung")
-if zielspalten:
-    zielwerte = {}
-    toleranzen = {}
-    gewichtung = {}
-
-    for ziel in zielspalten:
-        zielwerte[ziel] = st.number_input(f"Zielwert für {ziel}", value=float(df[ziel].mean()))
-        toleranzen[ziel] = st.number_input(f"Toleranz für {ziel} (±)", value=2.0 if "Glanz" in ziel else 1.0)
-        gewichtung[ziel] = st.slider(f"Gewichtung für {ziel}", min_value=0.0, max_value=5.0, value=1.0, step=0.1)
-
-    anzahl_varianten = 500
-    simulierte_formulierungen = []
-    score_liste = []
-
-    if st.button("🚀 Starte Zielsuche"):
-        for _ in range(anzahl_varianten):
-            zufall = {}
-            for roh in numerisch:
-                min_val = float(df[roh].min())
-                max_val = float(df[roh].max())
-                zufall[roh] = np.random.uniform(min_val, max_val)
-            simulierte_formulierungen.append(zufall)
-
-        sim_df = pd.DataFrame(simulierte_formulierungen)
-        sim_encoded = pd.get_dummies(sim_df)
-        for col in X_clean.columns:
-            if col not in sim_encoded.columns:
-                sim_encoded[col] = 0
-        sim_encoded = sim_encoded[X_clean.columns]
-
-        y_pred = modell.predict(sim_encoded)
-
-        treffer_idx = []
-        for i, y in enumerate(y_pred):
-            score = 0
-            passt = True
-            for ziel in zielspalten:
-                delta = abs(y[zielspalten.index(ziel)] - zielwerte[ziel])
-                score += delta * gewichtung[ziel]
-                if delta > toleranzen[ziel]:
-                    passt = False
-            if passt:
-                score_liste.append((i, score))
-
-        if score_liste:
-            score_liste.sort(key=lambda x: x[1])
-            treffer_idx = [i for i, s in score_liste]
-
-            treffer_df = sim_df.iloc[treffer_idx].copy()
-            vorhersagen_df = pd.DataFrame(
-                [y_pred[i] for i in treffer_idx],
-                columns=zielspalten
-            )
-
-            ergebnis_df = pd.concat(
-                [treffer_df.reset_index(drop=True), vorhersagen_df.reset_index(drop=True)],
-                axis=1
-            )
-            ergebnis_df.insert(0, "Score", [round(s, 2) for _, s in score_liste])
-
-            st.success(f"✅ {len(ergebnis_df)} passende Formulierungen gefunden!")
-            st.dataframe(ergebnis_df)
-
-# --- Vergleich und Diagramm ---
+# --- Interaktives Balkendiagramm nur anzeigen, wenn ergebnis_df existiert ---
 if 'ergebnis_df' in locals() and not ergebnis_df.empty:
     st.subheader("📊 Vergleich ausgewählter Formulierungen als Balkendiagramm")
     max_auswahl = min(len(ergebnis_df), 10)
